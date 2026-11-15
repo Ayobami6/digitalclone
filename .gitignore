@@ -1,0 +1,23 @@
+# Binaries & build outputs
+bin/
+digitalclone
+*.exe
+*.out
+coverage.out
+
+# Local databases & generated media assets
+data/
+assets/
+*.db
+*.db-wal
+*.db-shm
+
+# Environment secrets
+.env
+.env.local
+.env.*.local
+
+# OS & Editor files
+.DS_Store
+.idea/
+.vscode/
