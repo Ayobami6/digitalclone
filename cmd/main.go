@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -36,11 +37,12 @@ type appConfig struct {
 	PersonasDir           string
 	AssetsDir             string
 	PublicBaseURL         string
-	GeminiAPIKey          string
-	GeminiTextModel       string
-	GeminiImageModel      string
-	GeminiVideoModel      string
-	BufferAPIKey          string
+	GeminiAPIKey             string
+	GeminiTextModel          string
+	GeminiImageModel         string
+	GeminiVideoModel         string
+	GeminiVideoDurationSecs  int
+	BufferAPIKey             string
 	BufferOrgID           string
 	BufferLinkedInChannel string
 	BufferXChannel        string
@@ -218,11 +220,12 @@ func wireDependencies(ctx context.Context, cfg appConfig, logger *slog.Logger) (
 
 	personaLoader := persona.NewFilesystemPersonaLoader(cfg.PersonasDir)
 	mediaGen, err := genai.NewAdapter(ctx, genai.Config{
-		APIKey:     cfg.GeminiAPIKey,
-		TextModel:  cfg.GeminiTextModel,
-		ImageModel: cfg.GeminiImageModel,
-		VideoModel: cfg.GeminiVideoModel,
-		DryRun:     cfg.DryRun,
+		APIKey:               cfg.GeminiAPIKey,
+		TextModel:            cfg.GeminiTextModel,
+		ImageModel:           cfg.GeminiImageModel,
+		VideoModel:           cfg.GeminiVideoModel,
+		VideoDurationSeconds: cfg.GeminiVideoDurationSecs,
+		DryRun:               cfg.DryRun,
 	})
 	if err != nil {
 		cleanup()
@@ -320,17 +323,27 @@ func loadConfigFromEnv(logger *slog.Logger) appConfig {
 		geminiKey = strings.TrimSpace(os.Getenv("GOOGLE_API_KEY"))
 	}
 
+	geminiVideoDuration := 0
+	if rawDuration := strings.TrimSpace(os.Getenv("GEMINI_VIDEO_DURATION_SECONDS")); rawDuration != "" {
+		if parsed, parseErr := strconv.Atoi(rawDuration); parseErr == nil {
+			geminiVideoDuration = parsed
+		} else if logger != nil {
+			logger.Warn("invalid GEMINI_VIDEO_DURATION_SECONDS; using default 180s", "value", rawDuration, "error", parseErr)
+		}
+	}
+
 	return appConfig{
-		Port:                  envOrDefault("PORT", "8080"),
-		DatabaseURL:           strings.TrimSpace(os.Getenv("DATABASE_URL")),
-		SQLitePath:            envOrDefault("SQLITE_PATH", "./data/digitalclone.db"),
-		PersonasDir:           envOrDefault("PERSONAS_DIR", "./personas"),
-		AssetsDir:             envOrDefault("ASSET_LOCAL_DIR", "./assets"),
-		PublicBaseURL:         envOrDefault("PUBLIC_BASE_URL", "http://localhost:8080"),
-		GeminiAPIKey:          geminiKey,
-		GeminiTextModel:       envOrDefault("GEMINI_TEXT_MODEL", "gemini-2.5-flash"),
-		GeminiImageModel:      envOrDefault("GEMINI_IMAGE_MODEL", "imagen-3.0-generate-002"),
-		GeminiVideoModel:      envOrDefault("GEMINI_VIDEO_MODEL", "veo-2.0-generate-001"),
+		Port:                    envOrDefault("PORT", "8080"),
+		DatabaseURL:             strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		SQLitePath:              envOrDefault("SQLITE_PATH", "./data/digitalclone.db"),
+		PersonasDir:             envOrDefault("PERSONAS_DIR", "./personas"),
+		AssetsDir:               envOrDefault("ASSET_LOCAL_DIR", "./assets"),
+		PublicBaseURL:           envOrDefault("PUBLIC_BASE_URL", "http://localhost:8080"),
+		GeminiAPIKey:            geminiKey,
+		GeminiTextModel:         envOrDefault("GEMINI_TEXT_MODEL", "gemini-2.5-flash"),
+		GeminiImageModel:        envOrDefault("GEMINI_IMAGE_MODEL", "imagen-3.0-generate-002"),
+		GeminiVideoModel:        envOrDefault("GEMINI_VIDEO_MODEL", "veo-2.0-generate-001"),
+		GeminiVideoDurationSecs: geminiVideoDuration,
 		BufferAPIKey:          strings.TrimSpace(os.Getenv("BUFFER_API_KEY")),
 		BufferOrgID:           strings.TrimSpace(os.Getenv("BUFFER_ORGANIZATION_ID")),
 		BufferLinkedInChannel: strings.TrimSpace(os.Getenv("BUFFER_LINKEDIN_CHANNEL_ID")),

@@ -4,14 +4,20 @@
 package genai
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/genai"
 	"google.golang.org/genai/interactions/models/interactions"
 	"google.golang.org/genai/interactions/models/operations"
@@ -19,32 +25,47 @@ import (
 	"digitalclone/pkg/resilience"
 )
 
-// minimalPNGBytes is a valid 1x1 transparent PNG used in dry-run mode.
-const minimalPNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+const (
+	// minimalPNGBytes is a valid 1x1 transparent PNG used in dry-run mode.
+	minimalPNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+
+	minVideoDurationSeconds  = 180
+	maxVideoDurationSeconds  = 300
+	omniMaxClipDurationSecs  = 15
+	maxConcurrentVideoClips  = 3
+	perClipGenerationTimeout = 5 * time.Minute
+)
+
+// VideoStitcherFunc combines ordered MP4 clip payloads into a single MP4 video.
+type VideoStitcherFunc func(ctx context.Context, clips [][]byte) ([]byte, error)
 
 // Config configures models, API credentials, and timeouts for Google GenAI calls.
 type Config struct {
-	APIKey         string
-	TextModel      string
-	ImageModel     string
-	VideoModel     string
-	BaseURL        string
-	HTTPClient     *http.Client
-	RequestTimeout time.Duration
-	VideoTimeout   time.Duration
-	DryRun         bool
+	APIKey               string
+	TextModel            string
+	ImageModel           string
+	VideoModel           string
+	VideoDurationSeconds int
+	BaseURL              string
+	HTTPClient           *http.Client
+	RequestTimeout       time.Duration
+	VideoTimeout         time.Duration
+	VideoStitcher        VideoStitcherFunc
+	DryRun               bool
 }
 
 // Adapter implements domain.MediaGenerator using google.golang.org/genai.
 type Adapter struct {
-	client         *genai.Client
-	textModel      string
-	imageModel     string
-	videoModel     string
-	requestTimeout time.Duration
-	videoTimeout   time.Duration
-	dryRun         bool
-	breaker        *resilience.CircuitBreaker
+	client               *genai.Client
+	textModel            string
+	imageModel           string
+	videoModel           string
+	videoDurationSeconds int
+	requestTimeout       time.Duration
+	videoTimeout         time.Duration
+	videoStitcher        VideoStitcherFunc
+	dryRun               bool
+	breaker              *resilience.CircuitBreaker
 }
 
 // NewAdapter initializes a Google GenAI adapter. When DryRun is true or APIKey is empty,
@@ -59,11 +80,16 @@ func NewAdapter(ctx context.Context, config Config) (*Adapter, error) {
 	if strings.TrimSpace(config.VideoModel) == "" {
 		config.VideoModel = "gemini-omni-1.2-flash"
 	}
+	videoDuration := clampVideoDurationSeconds(config.VideoDurationSeconds)
 	if config.RequestTimeout <= 0 {
 		config.RequestTimeout = 90 * time.Second
 	}
 	if config.VideoTimeout <= 0 {
-		config.VideoTimeout = 10 * time.Minute
+		config.VideoTimeout = 20 * time.Minute
+	}
+	stitcher := config.VideoStitcher
+	if stitcher == nil {
+		stitcher = stitchMP4ClipsWithFFmpeg
 	}
 
 	var client *genai.Client
@@ -85,13 +111,15 @@ func NewAdapter(ctx context.Context, config Config) (*Adapter, error) {
 	}
 
 	return &Adapter{
-		client:         client,
-		textModel:      config.TextModel,
-		imageModel:     config.ImageModel,
-		videoModel:     config.VideoModel,
-		requestTimeout: config.RequestTimeout,
-		videoTimeout:   config.VideoTimeout,
-		dryRun:         config.DryRun || client == nil,
+		client:               client,
+		textModel:            config.TextModel,
+		imageModel:           config.ImageModel,
+		videoModel:           config.VideoModel,
+		videoDurationSeconds: videoDuration,
+		requestTimeout:       config.RequestTimeout,
+		videoTimeout:         config.VideoTimeout,
+		videoStitcher:        stitcher,
+		dryRun:               config.DryRun || client == nil,
 		breaker: resilience.NewCircuitBreaker(resilience.CircuitBreakerConfig{
 			Name:         "google-genai",
 			MaxFailures:  5,
@@ -146,9 +174,7 @@ func (adapter *Adapter) GenerateImage(ctx context.Context, prompt, aspectRatio s
 		}
 		return pngBytes, "image/png", nil
 	}
-	if strings.TrimSpace(aspectRatio) == "" {
-		aspectRatio = "16:9"
-	}
+	aspectRatio = NormalizeAspectRatio(aspectRatio, "16:9")
 
 	var (
 		imageBytes []byte
@@ -194,8 +220,8 @@ func (adapter *Adapter) GenerateImage(ctx context.Context, prompt, aspectRatio s
 	return imageBytes, mimeType, err
 }
 
-// GenerateVideo synthesizes a short-form video via Gemini Omni (Interactions API)
-// or Veo (`GenerateVideosFromSource`) depending on the configured VideoModel.
+// GenerateVideo synthesizes a 3-5 minute video via Gemini Omni multi-scene assembly
+// (15s clips stitched with ffmpeg) or Veo (`GenerateVideosFromSource`) depending on VideoModel.
 func (adapter *Adapter) GenerateVideo(ctx context.Context, prompt, aspectRatio string) ([]byte, string, error) {
 	if adapter.dryRun {
 		// Minimal valid ISO Base Media File Format header for dry-run pipelines and local tests.
@@ -206,9 +232,7 @@ func (adapter *Adapter) GenerateVideo(ctx context.Context, prompt, aspectRatio s
 		}
 		return dryRunMP4, "video/mp4", nil
 	}
-	if strings.TrimSpace(aspectRatio) == "" {
-		aspectRatio = "9:16"
-	}
+	aspectRatio = NormalizeAspectRatio(aspectRatio, "9:16")
 
 	var (
 		videoBytes []byte
@@ -417,12 +441,67 @@ func (adapter *Adapter) generateImageViaGenerateContent(ctx context.Context, mod
 }
 
 func (adapter *Adapter) generateVideoWithGeminiOmni(ctx context.Context, model, prompt, aspectRatio string) ([]byte, string, error) {
+	clipCount := (adapter.videoDurationSeconds + omniMaxClipDurationSecs - 1) / omniMaxClipDurationSecs
+	if clipCount < 1 {
+		clipCount = 1
+	}
+
+	scenePrompts := adapter.buildVideoStoryboard(ctx, prompt, clipCount)
+	clips := make([][]byte, clipCount)
+	mimeType := "video/mp4"
+
+	sem := make(chan struct{}, maxConcurrentVideoClips)
+	group, groupCtx := errgroup.WithContext(ctx)
+
+	for idx, scenePrompt := range scenePrompts {
+		clipIndex := idx
+		clipPrompt := scenePrompt
+		group.Go(func() error {
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-groupCtx.Done():
+				return groupCtx.Err()
+			}
+
+			var lastErr error
+			for attempt := 0; attempt < 2; attempt++ {
+				clipCtx, cancel := context.WithTimeout(groupCtx, perClipGenerationTimeout)
+				clipBytes, clipMime, err := adapter.generateSingleOmniClip(clipCtx, model, clipPrompt, aspectRatio, fmt.Sprintf("%ds", omniMaxClipDurationSecs))
+				cancel()
+				if err == nil && len(clipBytes) > 0 {
+					clips[clipIndex] = clipBytes
+					if clipIndex == 0 && clipMime != "" {
+						mimeType = clipMime
+					}
+					return nil
+				}
+				lastErr = err
+				if groupCtx.Err() != nil {
+					return groupCtx.Err()
+				}
+			}
+			return fmt.Errorf("generate clip %d/%d: %w", clipIndex+1, clipCount, lastErr)
+		})
+	}
+
+	if err := group.Wait(); err != nil {
+		return nil, "", err
+	}
+
+	stitchedBytes, err := adapter.videoStitcher(ctx, clips)
+	if err != nil {
+		return nil, "", fmt.Errorf("stitch %d video clips: %w", clipCount, err)
+	}
+	return stitchedBytes, mimeType, nil
+}
+
+func (adapter *Adapter) generateSingleOmniClip(ctx context.Context, model, prompt, aspectRatio, duration string) ([]byte, string, error) {
 	modelInput := interactions.NewInteractionsInput([]interactions.Content{{
 		TextContent: &interactions.TextContent{Text: prompt},
 	}})
 	aspect := interactions.VideoResponseFormatAspectRatio(aspectRatio)
 	delivery := interactions.VideoResponseFormatDeliveryURI
-	duration := "5s"
 	videoRespFmt := interactions.NewCreateModelInteractionResponseFormat(
 		interactions.NewResponseFormat(interactions.VideoResponseFormat{
 			AspectRatio: &aspect,
@@ -479,6 +558,185 @@ func (adapter *Adapter) generateVideoWithGeminiOmni(ctx context.Context, model, 
 	}
 
 	return nil, "", fmt.Errorf("output_video contained neither base64 data nor URI")
+}
+
+// buildVideoStoryboard expands a video concept into clipCount sequential 15-second scene prompts
+// using Gemini text generation, falling back to deterministic scene prompts if needed.
+func (adapter *Adapter) buildVideoStoryboard(ctx context.Context, basePrompt string, clipCount int) []string {
+	fallback := deterministicStoryboard(basePrompt, clipCount)
+	if adapter.client == nil || clipCount <= 1 {
+		return fallback
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	instruction := fmt.Sprintf(
+		"Break the following video concept into exactly %d sequential 15-second visual scenes forming a cohesive %d-second video. "+
+			"Maintain consistent visual style, lighting, and subject continuity across scenes. "+
+			"Respond ONLY with a JSON array of %d concise scene prompt strings.\n\nVideo Concept:\n%s",
+		clipCount,
+		clipCount*omniMaxClipDurationSecs,
+		clipCount,
+		basePrompt,
+	)
+
+	resp, err := adapter.client.Models.GenerateContent(
+		reqCtx,
+		adapter.textModel,
+		genai.Text(instruction),
+		&genai.GenerateContentConfig{
+			ResponseMIMEType: "application/json",
+		},
+	)
+	if err != nil || resp == nil {
+		return fallback
+	}
+
+	raw := strings.TrimSpace(resp.Text())
+	raw = strings.TrimPrefix(raw, "```json")
+	raw = strings.TrimPrefix(raw, "```")
+	raw = strings.TrimSuffix(raw, "```")
+	raw = strings.TrimSpace(raw)
+
+	var scenes []string
+	if unmarshalErr := json.Unmarshal([]byte(raw), &scenes); unmarshalErr != nil || len(scenes) < clipCount {
+		return fallback
+	}
+
+	result := make([]string, clipCount)
+	for i := 0; i < clipCount; i++ {
+		trimmed := strings.TrimSpace(scenes[i])
+		if trimmed == "" {
+			return fallback
+		}
+		result[i] = trimmed
+	}
+	return result
+}
+
+func deterministicStoryboard(basePrompt string, clipCount int) []string {
+	scenes := make([]string, clipCount)
+	for i := 0; i < clipCount; i++ {
+		var phase string
+		switch {
+		case i == 0:
+			phase = "Opening hook and visual introduction"
+		case i == clipCount-1:
+			phase = "Closing summary and final takeaway"
+		default:
+			phase = fmt.Sprintf("Continuation part %d demonstrating core technical details", i)
+		}
+		scenes[i] = fmt.Sprintf("Scene %d of %d (%s): %s", i+1, clipCount, phase, basePrompt)
+	}
+	return scenes
+}
+
+func stitchMP4ClipsWithFFmpeg(ctx context.Context, clips [][]byte) ([]byte, error) {
+	if len(clips) == 0 {
+		return nil, fmt.Errorf("no video clips provided to stitch")
+	}
+	if len(clips) == 1 {
+		return clips[0], nil
+	}
+
+	ffmpegPath, err := resolveFFmpegBinary()
+	if err != nil {
+		return nil, err
+	}
+
+	tmpDir, err := os.MkdirTemp("", "digitalclone-stitch-*")
+	if err != nil {
+		return nil, fmt.Errorf("create temp stitch dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	var concatList strings.Builder
+	for idx, clipBytes := range clips {
+		if len(clipBytes) == 0 {
+			return nil, fmt.Errorf("clip %d is empty", idx)
+		}
+		clipName := fmt.Sprintf("clip_%03d.mp4", idx)
+		clipPath := filepath.Join(tmpDir, clipName)
+		if writeErr := os.WriteFile(clipPath, clipBytes, 0o600); writeErr != nil {
+			return nil, fmt.Errorf("write %s: %w", clipName, writeErr)
+		}
+		fmt.Fprintf(&concatList, "file '%s'\n", clipName)
+	}
+
+	concatPath := filepath.Join(tmpDir, "concat.txt")
+	if writeErr := os.WriteFile(concatPath, []byte(concatList.String()), 0o600); writeErr != nil {
+		return nil, fmt.Errorf("write concat list: %w", writeErr)
+	}
+
+	outputPath := filepath.Join(tmpDir, "stitched.mp4")
+
+	// Try lossless stream-copy concatenation first; fall back to normalized H.264/AAC re-encoding
+	// if clips have mismatched stream parameters or missing audio tracks.
+	copyCmd := exec.CommandContext(ctx, ffmpegPath,
+		"-y", "-f", "concat", "-safe", "0", "-i", concatPath,
+		"-c", "copy", "-movflags", "+faststart", outputPath,
+	)
+	var copyStderr bytes.Buffer
+	copyCmd.Stderr = &copyStderr
+	if copyErr := copyCmd.Run(); copyErr != nil {
+		reencodeCmd := exec.CommandContext(ctx, ffmpegPath,
+			"-y", "-f", "concat", "-safe", "0", "-i", concatPath,
+			"-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+			"-c:a", "aac", "-pix_fmt", "yuv420p", "-movflags", "+faststart", outputPath,
+		)
+		var reencodeStderr bytes.Buffer
+		reencodeCmd.Stderr = &reencodeStderr
+		if reencodeErr := reencodeCmd.Run(); reencodeErr != nil {
+			return nil, fmt.Errorf("ffmpeg concat failed (copy: %v; reencode: %v: %s)", copyErr, reencodeErr, strings.TrimSpace(reencodeStderr.String()))
+		}
+	}
+
+	stitchedBytes, readErr := os.ReadFile(outputPath)
+	if readErr != nil {
+		return nil, fmt.Errorf("read stitched video: %w", readErr)
+	}
+	if len(stitchedBytes) == 0 {
+		return nil, fmt.Errorf("ffmpeg produced an empty stitched video")
+	}
+	return stitchedBytes, nil
+}
+
+func resolveFFmpegBinary() (string, error) {
+	if path, err := exec.LookPath("ffmpeg"); err == nil {
+		return path, nil
+	}
+	for _, candidate := range []string{"/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"} {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("ffmpeg binary not found in PATH or standard locations (/opt/homebrew/bin/ffmpeg, /usr/local/bin/ffmpeg)")
+}
+
+func clampVideoDurationSeconds(seconds int) int {
+	if seconds <= 0 {
+		return minVideoDurationSeconds
+	}
+	if seconds < minVideoDurationSeconds {
+		return minVideoDurationSeconds
+	}
+	if seconds > maxVideoDurationSeconds {
+		return maxVideoDurationSeconds
+	}
+	return seconds
+}
+
+// NormalizeAspectRatio trims whitespace and trailing punctuation (such as "16:9,")
+// and returns fallback when the normalized value is empty.
+func NormalizeAspectRatio(aspectRatio, fallback string) string {
+	cleaned := strings.TrimSpace(aspectRatio)
+	cleaned = strings.Trim(cleaned, ".,;\"'")
+	cleaned = strings.TrimSpace(cleaned)
+	if cleaned == "" {
+		return fallback
+	}
+	return cleaned
 }
 
 func awaitInteractionIfPending(

@@ -60,7 +60,7 @@ func NewHybridAssetStorage(config Config) *HybridAssetStorage {
 
 	httpClient := config.HTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 15 * time.Second}
+		httpClient = &http.Client{Timeout: 3 * time.Minute}
 	}
 
 	return &HybridAssetStorage{

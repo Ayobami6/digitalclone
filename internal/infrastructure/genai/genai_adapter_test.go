@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"digitalclone/internal/infrastructure/genai"
@@ -187,23 +189,28 @@ func TestGenAIAdapterGeminiImageFallbackToGenerateContent(t *testing.T) {
 func TestGenAIAdapterGeminiOmniVideo(t *testing.T) {
 	t.Parallel()
 
-	mp4Bytes := []byte{
+	mp4Clip := []byte{
 		0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p',
 		'm', 'p', '4', '2', 0x00, 0x00, 0x00, 0x00,
 	}
 
-	var seenRespFormat map[string]any
-	var downloadCalled bool
+	var mu sync.Mutex
+	var seenRespFormats []map[string]any
+	var interactionsCount atomic.Int32
+	var downloadCount atomic.Int32
 
 	httpClient := newTestHTTPClient(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/v1beta/interactions":
+		switch {
+		case r.URL.Path == "/v1beta/interactions":
 			bodyBytes, _ := io.ReadAll(r.Body)
 			var payload map[string]any
 			_ = json.Unmarshal(bodyBytes, &payload)
 			if rf, ok := payload["response_format"].(map[string]any); ok {
-				seenRespFormat = rf
+				mu.Lock()
+				seenRespFormats = append(seenRespFormats, rf)
+				mu.Unlock()
 			}
+			interactionsCount.Add(1)
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"id":     "inter_vid_1",
@@ -221,14 +228,36 @@ func TestGenAIAdapterGeminiOmniVideo(t *testing.T) {
 					},
 				},
 			})
-		case "/v1beta/files/vid123abc:download":
-			downloadCalled = true
+		case r.URL.Path == "/v1beta/files/vid123abc:download":
+			downloadCount.Add(1)
 			w.Header().Set("Content-Type", "video/mp4")
-			_, _ = w.Write(mp4Bytes)
+			_, _ = w.Write(mp4Clip)
+		case strings.HasSuffix(r.URL.Path, ":generateContent"):
+			w.Header().Set("Content-Type", "application/json")
+			scenes := make([]string, 12)
+			for i := range scenes {
+				scenes[i] = "scene prompt"
+			}
+			rawJSON, _ := json.Marshal(scenes)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"candidates": []map[string]any{
+					{
+						"content": map[string]any{
+							"role": "model",
+							"parts": []map[string]any{
+								{"text": string(rawJSON)},
+							},
+						},
+					},
+				},
+			})
 		default:
 			http.NotFound(w, r)
 		}
 	})
+
+	var stitchedClipCount int
+	stitchedPayload := []byte("STITCHED-3MIN-MP4")
 
 	ctx := context.Background()
 	adapter, err := genai.NewAdapter(ctx, genai.Config{
@@ -236,6 +265,10 @@ func TestGenAIAdapterGeminiOmniVideo(t *testing.T) {
 		VideoModel: "gemini-omni-1.2-flash",
 		BaseURL:    "https://genai.test",
 		HTTPClient: httpClient,
+		VideoStitcher: func(_ context.Context, clips [][]byte) ([]byte, error) {
+			stitchedClipCount = len(clips)
+			return stitchedPayload, nil
+		},
 	})
 	if err != nil {
 		t.Fatalf("NewAdapter failed: %v", err)
@@ -245,14 +278,86 @@ func TestGenAIAdapterGeminiOmniVideo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateVideo failed: %v", err)
 	}
-	if seenRespFormat["type"] != "video" || seenRespFormat["delivery"] != "uri" || seenRespFormat["aspect_ratio"] != "9:16" {
-		t.Fatalf("unexpected response_format payload: %+v", seenRespFormat)
+	if got := interactionsCount.Load(); got != 12 {
+		t.Fatalf("expected 12 Omni clip interactions for 180s default video, got %d", got)
 	}
-	if !downloadCalled {
-		t.Fatalf("expected video file download endpoint to be called")
+	if got := downloadCount.Load(); got != 12 {
+		t.Fatalf("expected 12 clip downloads, got %d", got)
 	}
-	if gotMime != "video/mp4" || !bytes.Equal(gotBytes, mp4Bytes) {
-		t.Fatalf("unexpected video result: mime=%s len=%d", gotMime, len(gotBytes))
+	if stitchedClipCount != 12 {
+		t.Fatalf("expected stitcher to receive 12 clips, got %d", stitchedClipCount)
+	}
+	if len(seenRespFormats) == 0 || seenRespFormats[0]["type"] != "video" || seenRespFormats[0]["delivery"] != "uri" || seenRespFormats[0]["aspect_ratio"] != "9:16" || seenRespFormats[0]["duration"] != "15s" {
+		t.Fatalf("unexpected response_format payload: %+v", seenRespFormats[0])
+	}
+	if gotMime != "video/mp4" || !bytes.Equal(gotBytes, stitchedPayload) {
+		t.Fatalf("unexpected video result: mime=%s bytes=%q", gotMime, string(gotBytes))
+	}
+}
+
+func TestGenAIAdapterVideoDurationClamping(t *testing.T) {
+	t.Parallel()
+
+	var interactionsCount atomic.Int32
+	httpClient := newTestHTTPClient(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1beta/interactions":
+			interactionsCount.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":     "inter_vid_clamp",
+				"status": "completed",
+				"steps": []map[string]any{
+					{
+						"type": "model_output",
+						"content": []map[string]any{
+							{
+								"type":      "video",
+								"data":      base64.StdEncoding.EncodeToString([]byte("mp4")),
+								"mime_type": "video/mp4",
+							},
+						},
+					},
+				},
+			})
+		case strings.HasSuffix(r.URL.Path, ":generateContent"):
+			http.Error(w, "fallback to deterministic storyboard", http.StatusServiceUnavailable)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	ctx := context.Background()
+	adapter, err := genai.NewAdapter(ctx, genai.Config{
+		APIKey:               "test-key",
+		VideoModel:           "gemini-omni-1.2-flash",
+		VideoDurationSeconds: 600, // Should clamp to max 300s (20 x 15s clips).
+		BaseURL:              "https://genai.test",
+		HTTPClient:           httpClient,
+		VideoStitcher: func(_ context.Context, clips [][]byte) ([]byte, error) {
+			return []byte("STITCHED-5MIN"), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewAdapter failed: %v", err)
+	}
+
+	if _, _, err := adapter.GenerateVideo(ctx, "deep dive", "9:16"); err != nil {
+		t.Fatalf("GenerateVideo failed: %v", err)
+	}
+	if got := interactionsCount.Load(); got != 20 {
+		t.Fatalf("expected 20 clips for clamped 300s max duration, got %d", got)
+	}
+}
+
+func TestNormalizeAspectRatio(t *testing.T) {
+	t.Parallel()
+
+	if got := genai.NormalizeAspectRatio(" 16:9, ", "1:1"); got != "16:9" {
+		t.Fatalf("expected 16:9, got %q", got)
+	}
+	if got := genai.NormalizeAspectRatio("", "9:16"); got != "9:16" {
+		t.Fatalf("expected fallback 9:16, got %q", got)
 	}
 }
 
