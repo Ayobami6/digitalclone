@@ -31,43 +31,43 @@ import (
 )
 
 type appConfig struct {
-	Port                  string
-	DatabaseURL           string
-	SQLitePath            string
-	PersonasDir           string
-	AssetsDir             string
-	PublicBaseURL         string
-	GeminiAPIKey             string
-	GeminiTextModel          string
-	GeminiImageModel         string
-	GeminiVideoModel         string
-	GeminiVideoDurationSecs  int
-	BufferAPIKey             string
-	BufferOrgID           string
-	BufferLinkedInChannel string
-	BufferXChannel        string
-	BufferTikTokChannel   string
-	BufferShareMode       buffer.ShareMode
-	YouTubeClientID       string
-	YouTubeClientSecret   string
-	YouTubeRefreshToken   string
-	YouTubeAccessToken    string
-	YouTubePrivacyStatus  string
-	DiscordBotToken       string
-	DiscordChannelID      string
-	DiscordPublicKeyHex   string
-	TelegramBotToken      string
-	TelegramChatID        string
-	TelegramWebhookSecret string
-	GitHubToken           string
-	GitHubWebhookSecret   string
-	S3Bucket              string
-	S3Region              string
-	S3Endpoint            string
-	S3AccessKeyID         string
-	S3SecretKey           string
-	S3PublicBaseURL       string
-	DryRun                bool
+	Port                    string
+	DatabaseURL             string
+	SQLitePath              string
+	PersonasDir             string
+	AssetsDir               string
+	PublicBaseURL           string
+	GeminiAPIKey            string
+	GeminiTextModel         string
+	GeminiImageModel        string
+	GeminiVideoModel        string
+	GeminiVideoDurationSecs int
+	BufferAPIKey            string
+	BufferOrgID             string
+	BufferLinkedInChannel   string
+	BufferXChannel          string
+	BufferTikTokChannel     string
+	BufferShareMode         buffer.ShareMode
+	YouTubeClientID         string
+	YouTubeClientSecret     string
+	YouTubeRefreshToken     string
+	YouTubeAccessToken      string
+	YouTubePrivacyStatus    string
+	DiscordBotToken         string
+	DiscordChannelID        string
+	DiscordPublicKeyHex     string
+	TelegramBotToken        string
+	TelegramChatID          string
+	TelegramWebhookSecret   string
+	GitHubToken             string
+	GitHubWebhookSecret     string
+	S3Bucket                string
+	S3Region                string
+	S3Endpoint              string
+	S3AccessKeyID           string
+	S3SecretKey             string
+	S3PublicBaseURL         string
+	DryRun                  bool
 }
 
 func main() {
@@ -323,12 +323,12 @@ func loadConfigFromEnv(logger *slog.Logger) appConfig {
 		geminiKey = strings.TrimSpace(os.Getenv("GOOGLE_API_KEY"))
 	}
 
-	geminiVideoDuration := 0
+	geminiVideoDuration := 15
 	if rawDuration := strings.TrimSpace(os.Getenv("GEMINI_VIDEO_DURATION_SECONDS")); rawDuration != "" {
 		if parsed, parseErr := strconv.Atoi(rawDuration); parseErr == nil {
 			geminiVideoDuration = parsed
 		} else if logger != nil {
-			logger.Warn("invalid GEMINI_VIDEO_DURATION_SECONDS; using default 180s", "value", rawDuration, "error", parseErr)
+			logger.Warn("invalid GEMINI_VIDEO_DURATION_SECONDS; using default 15s", "value", rawDuration, "error", parseErr)
 		}
 	}
 
@@ -344,32 +344,32 @@ func loadConfigFromEnv(logger *slog.Logger) appConfig {
 		GeminiImageModel:        envOrDefault("GEMINI_IMAGE_MODEL", "imagen-3.0-generate-002"),
 		GeminiVideoModel:        envOrDefault("GEMINI_VIDEO_MODEL", "veo-2.0-generate-001"),
 		GeminiVideoDurationSecs: geminiVideoDuration,
-		BufferAPIKey:          strings.TrimSpace(os.Getenv("BUFFER_API_KEY")),
-		BufferOrgID:           strings.TrimSpace(os.Getenv("BUFFER_ORGANIZATION_ID")),
-		BufferLinkedInChannel: strings.TrimSpace(os.Getenv("BUFFER_LINKEDIN_CHANNEL_ID")),
-		BufferXChannel:        strings.TrimSpace(os.Getenv("BUFFER_X_CHANNEL_ID")),
-		BufferTikTokChannel:   strings.TrimSpace(os.Getenv("BUFFER_TIKTOK_CHANNEL_ID")),
-		BufferShareMode:       shareMode,
-		YouTubeClientID:       strings.TrimSpace(os.Getenv("YOUTUBE_CLIENT_ID")),
-		YouTubeClientSecret:   strings.TrimSpace(os.Getenv("YOUTUBE_CLIENT_SECRET")),
-		YouTubeRefreshToken:   strings.TrimSpace(os.Getenv("YOUTUBE_REFRESH_TOKEN")),
-		YouTubeAccessToken:    strings.TrimSpace(os.Getenv("YOUTUBE_ACCESS_TOKEN")),
-		YouTubePrivacyStatus:  envOrDefault("YOUTUBE_PRIVACY_STATUS", "unlisted"),
-		DiscordBotToken:       strings.TrimSpace(os.Getenv("DISCORD_BOT_TOKEN")),
-		DiscordChannelID:      strings.TrimSpace(os.Getenv("DISCORD_CHANNEL_ID")),
-		DiscordPublicKeyHex:   strings.TrimSpace(os.Getenv("DISCORD_PUBLIC_KEY")),
-		TelegramBotToken:      strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
-		TelegramChatID:        strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID")),
-		TelegramWebhookSecret: strings.TrimSpace(os.Getenv("TELEGRAM_WEBHOOK_SECRET")),
-		GitHubToken:           strings.TrimSpace(os.Getenv("GITHUB_TOKEN")),
-		GitHubWebhookSecret:   strings.TrimSpace(os.Getenv("GITHUB_WEBHOOK_SECRET")),
-		S3Bucket:              strings.TrimSpace(os.Getenv("S3_BUCKET")),
-		S3Region:              envOrDefault("S3_REGION", "us-east-1"),
-		S3Endpoint:            strings.TrimSpace(os.Getenv("S3_ENDPOINT")),
-		S3AccessKeyID:         strings.TrimSpace(os.Getenv("S3_ACCESS_KEY_ID")),
-		S3SecretKey:           strings.TrimSpace(os.Getenv("S3_SECRET_ACCESS_KEY")),
-		S3PublicBaseURL:       strings.TrimSpace(os.Getenv("S3_PUBLIC_BASE_URL")),
-		DryRun:                strings.EqualFold(strings.TrimSpace(os.Getenv("DRY_RUN")), "true"),
+		BufferAPIKey:            strings.TrimSpace(os.Getenv("BUFFER_API_KEY")),
+		BufferOrgID:             strings.TrimSpace(os.Getenv("BUFFER_ORGANIZATION_ID")),
+		BufferLinkedInChannel:   strings.TrimSpace(os.Getenv("BUFFER_LINKEDIN_CHANNEL_ID")),
+		BufferXChannel:          strings.TrimSpace(os.Getenv("BUFFER_X_CHANNEL_ID")),
+		BufferTikTokChannel:     strings.TrimSpace(os.Getenv("BUFFER_TIKTOK_CHANNEL_ID")),
+		BufferShareMode:         shareMode,
+		YouTubeClientID:         strings.TrimSpace(os.Getenv("YOUTUBE_CLIENT_ID")),
+		YouTubeClientSecret:     strings.TrimSpace(os.Getenv("YOUTUBE_CLIENT_SECRET")),
+		YouTubeRefreshToken:     strings.TrimSpace(os.Getenv("YOUTUBE_REFRESH_TOKEN")),
+		YouTubeAccessToken:      strings.TrimSpace(os.Getenv("YOUTUBE_ACCESS_TOKEN")),
+		YouTubePrivacyStatus:    envOrDefault("YOUTUBE_PRIVACY_STATUS", "unlisted"),
+		DiscordBotToken:         strings.TrimSpace(os.Getenv("DISCORD_BOT_TOKEN")),
+		DiscordChannelID:        strings.TrimSpace(os.Getenv("DISCORD_CHANNEL_ID")),
+		DiscordPublicKeyHex:     strings.TrimSpace(os.Getenv("DISCORD_PUBLIC_KEY")),
+		TelegramBotToken:        strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
+		TelegramChatID:          strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID")),
+		TelegramWebhookSecret:   strings.TrimSpace(os.Getenv("TELEGRAM_WEBHOOK_SECRET")),
+		GitHubToken:             strings.TrimSpace(os.Getenv("GITHUB_TOKEN")),
+		GitHubWebhookSecret:     strings.TrimSpace(os.Getenv("GITHUB_WEBHOOK_SECRET")),
+		S3Bucket:                strings.TrimSpace(os.Getenv("S3_BUCKET")),
+		S3Region:                envOrDefault("S3_REGION", "us-east-1"),
+		S3Endpoint:              strings.TrimSpace(os.Getenv("S3_ENDPOINT")),
+		S3AccessKeyID:           strings.TrimSpace(os.Getenv("S3_ACCESS_KEY_ID")),
+		S3SecretKey:             strings.TrimSpace(os.Getenv("S3_SECRET_ACCESS_KEY")),
+		S3PublicBaseURL:         strings.TrimSpace(os.Getenv("S3_PUBLIC_BASE_URL")),
+		DryRun:                  strings.EqualFold(strings.TrimSpace(os.Getenv("DRY_RUN")), "true"),
 	}
 }
 

@@ -29,11 +29,13 @@ const (
 	// minimalPNGBytes is a valid 1x1 transparent PNG used in dry-run mode.
 	minimalPNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
 
-	minVideoDurationSeconds  = 180
-	maxVideoDurationSeconds  = 300
-	omniMaxClipDurationSecs  = 15
-	maxConcurrentVideoClips  = 3
-	perClipGenerationTimeout = 5 * time.Minute
+	defaultVideoDurationSeconds = 15
+	minVideoDurationSeconds     = 15
+	maxVideoDurationSeconds     = 300
+	omniMaxClipDurationSecs     = 15
+	maxConcurrentVideoClips     = 1
+	perClipGenerationTimeout    = 5 * time.Minute
+	defaultRateLimitRetryDelay  = 5 * time.Second
 )
 
 // VideoStitcherFunc combines ordered MP4 clip payloads into a single MP4 video.
@@ -63,6 +65,8 @@ type Adapter struct {
 	videoDurationSeconds int
 	requestTimeout       time.Duration
 	videoTimeout         time.Duration
+	rateLimitRetryDelay  time.Duration
+	omniClipSem          chan struct{}
 	videoStitcher        VideoStitcherFunc
 	dryRun               bool
 	breaker              *resilience.CircuitBreaker
@@ -86,6 +90,11 @@ func NewAdapter(ctx context.Context, config Config) (*Adapter, error) {
 	}
 	if config.VideoTimeout <= 0 {
 		config.VideoTimeout = 20 * time.Minute
+	}
+	retryDelay := defaultRateLimitRetryDelay
+	if strings.TrimSpace(config.BaseURL) != "" {
+		// Use a short backoff when pointed at a mock/custom test BaseURL so unit tests run quickly.
+		retryDelay = 10 * time.Millisecond
 	}
 	stitcher := config.VideoStitcher
 	if stitcher == nil {
@@ -118,6 +127,8 @@ func NewAdapter(ctx context.Context, config Config) (*Adapter, error) {
 		videoDurationSeconds: videoDuration,
 		requestTimeout:       config.RequestTimeout,
 		videoTimeout:         config.VideoTimeout,
+		rateLimitRetryDelay:  retryDelay,
+		omniClipSem:          make(chan struct{}, maxConcurrentVideoClips),
 		videoStitcher:        stitcher,
 		dryRun:               config.DryRun || client == nil,
 		breaker: resilience.NewCircuitBreaker(resilience.CircuitBreakerConfig{
@@ -220,8 +231,8 @@ func (adapter *Adapter) GenerateImage(ctx context.Context, prompt, aspectRatio s
 	return imageBytes, mimeType, err
 }
 
-// GenerateVideo synthesizes a 3-5 minute video via Gemini Omni multi-scene assembly
-// (15s clips stitched with ffmpeg) or Veo (`GenerateVideosFromSource`) depending on VideoModel.
+// GenerateVideo synthesizes a 15-second to 5-minute video (default 15s single clip) via
+// Gemini Omni (15s clip(s), stitched with ffmpeg when multi-clip) or Veo (`GenerateVideosFromSource`).
 func (adapter *Adapter) GenerateVideo(ctx context.Context, prompt, aspectRatio string) ([]byte, string, error) {
 	if adapter.dryRun {
 		// Minimal valid ISO Base Media File Format header for dry-run pipelines and local tests.
@@ -450,7 +461,10 @@ func (adapter *Adapter) generateVideoWithGeminiOmni(ctx context.Context, model, 
 	clips := make([][]byte, clipCount)
 	mimeType := "video/mp4"
 
-	sem := make(chan struct{}, maxConcurrentVideoClips)
+	sem := adapter.omniClipSem
+	if sem == nil {
+		sem = make(chan struct{}, maxConcurrentVideoClips)
+	}
 	group, groupCtx := errgroup.WithContext(ctx)
 
 	for idx, scenePrompt := range scenePrompts {
@@ -479,6 +493,19 @@ func (adapter *Adapter) generateVideoWithGeminiOmni(ctx context.Context, model, 
 				lastErr = err
 				if groupCtx.Err() != nil {
 					return groupCtx.Err()
+				}
+				if attempt == 0 && isRateLimitError(err) {
+					delay := adapter.rateLimitRetryDelay
+					if delay <= 0 {
+						delay = defaultRateLimitRetryDelay
+					}
+					timer := time.NewTimer(delay)
+					select {
+					case <-groupCtx.Done():
+						timer.Stop()
+						return groupCtx.Err()
+					case <-timer.C:
+					}
 				}
 			}
 			return fmt.Errorf("generate clip %d/%d: %w", clipIndex+1, clipCount, lastErr)
@@ -616,13 +643,16 @@ func (adapter *Adapter) buildVideoStoryboard(ctx context.Context, basePrompt str
 }
 
 func deterministicStoryboard(basePrompt string, clipCount int) []string {
+	if clipCount <= 1 {
+		return []string{strings.TrimSpace(basePrompt)}
+	}
 	scenes := make([]string, clipCount)
 	for i := 0; i < clipCount; i++ {
 		var phase string
-		switch {
-		case i == 0:
+		switch i {
+		case 0:
 			phase = "Opening hook and visual introduction"
-		case i == clipCount-1:
+		case clipCount - 1:
 			phase = "Closing summary and final takeaway"
 		default:
 			phase = fmt.Sprintf("Continuation part %d demonstrating core technical details", i)
@@ -716,7 +746,7 @@ func resolveFFmpegBinary() (string, error) {
 
 func clampVideoDurationSeconds(seconds int) int {
 	if seconds <= 0 {
-		return minVideoDurationSeconds
+		return defaultVideoDurationSeconds
 	}
 	if seconds < minVideoDurationSeconds {
 		return minVideoDurationSeconds
@@ -725,6 +755,16 @@ func clampVideoDurationSeconds(seconds int) int {
 		return maxVideoDurationSeconds
 	}
 	return seconds
+}
+
+func isRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "429") ||
+		strings.Contains(lower, "too_many_requests") ||
+		strings.Contains(lower, "resource_exhausted")
 }
 
 // NormalizeAspectRatio trims whitespace and trailing punctuation (such as "16:9,")

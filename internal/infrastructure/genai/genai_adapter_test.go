@@ -186,6 +186,106 @@ func TestGenAIAdapterGeminiImageFallbackToGenerateContent(t *testing.T) {
 	}
 }
 
+func TestGenAIAdapterGeminiOmniSingle15sClipDefault(t *testing.T) {
+	t.Parallel()
+
+	mp4Clip := []byte{
+		0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p',
+		'm', 'p', '4', '2', 0x00, 0x00, 0x00, 0x00,
+	}
+
+	var mu sync.Mutex
+	var seenRespFormats []map[string]any
+	var interactionsCount atomic.Int32
+	var downloadCount atomic.Int32
+	var generateContentCount atomic.Int32
+
+	httpClient := newTestHTTPClient(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1beta/interactions":
+			bodyBytes, _ := io.ReadAll(r.Body)
+			var payload map[string]any
+			_ = json.Unmarshal(bodyBytes, &payload)
+			if rf, ok := payload["response_format"].(map[string]any); ok {
+				mu.Lock()
+				seenRespFormats = append(seenRespFormats, rf)
+				mu.Unlock()
+			}
+			callNum := interactionsCount.Add(1)
+			if callNum == 1 {
+				// Simulate transient 429 spend rate-limit error on first attempt to verify backoff retry.
+				http.Error(w, `{"error":{"code":"too_many_requests","message":"spend rate limit exceeded"}}`, http.StatusTooManyRequests)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":     "inter_vid_single",
+				"status": "completed",
+				"steps": []map[string]any{
+					{
+						"type": "model_output",
+						"content": []map[string]any{
+							{
+								"type":      "video",
+								"uri":       "https://genai.test/v1beta/files/vid15s",
+								"mime_type": "video/mp4",
+							},
+						},
+					},
+				},
+			})
+		case r.URL.Path == "/v1beta/files/vid15s:download":
+			downloadCount.Add(1)
+			w.Header().Set("Content-Type", "video/mp4")
+			_, _ = w.Write(mp4Clip)
+		case strings.HasSuffix(r.URL.Path, ":generateContent"):
+			generateContentCount.Add(1)
+			http.Error(w, "unexpected storyboard call for 15s single clip", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	var stitchedClipCount int
+	ctx := context.Background()
+	adapter, err := genai.NewAdapter(ctx, genai.Config{
+		APIKey:     "test-key",
+		VideoModel: "gemini-omni-1.2-flash",
+		BaseURL:    "https://genai.test",
+		HTTPClient: httpClient,
+		VideoStitcher: func(_ context.Context, clips [][]byte) ([]byte, error) {
+			stitchedClipCount = len(clips)
+			return clips[0], nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewAdapter failed: %v", err)
+	}
+
+	gotBytes, gotMime, err := adapter.GenerateVideo(ctx, "fast code walkthrough", "9:16")
+	if err != nil {
+		t.Fatalf("GenerateVideo failed: %v", err)
+	}
+	if got := generateContentCount.Load(); got != 0 {
+		t.Fatalf("expected 0 storyboard GenerateContent calls for 15s default clip, got %d", got)
+	}
+	if got := interactionsCount.Load(); got != 2 {
+		t.Fatalf("expected 2 interaction attempts (1 rate-limited + 1 succeeded) for single 15s clip, got %d", got)
+	}
+	if got := downloadCount.Load(); got != 1 {
+		t.Fatalf("expected 1 clip download, got %d", got)
+	}
+	if stitchedClipCount != 1 {
+		t.Fatalf("expected stitcher to receive 1 clip, got %d", stitchedClipCount)
+	}
+	if len(seenRespFormats) == 0 || seenRespFormats[0]["duration"] != "15s" || seenRespFormats[0]["aspect_ratio"] != "9:16" {
+		t.Fatalf("unexpected response_format payload: %+v", seenRespFormats[0])
+	}
+	if gotMime != "video/mp4" || !bytes.Equal(gotBytes, mp4Clip) {
+		t.Fatalf("unexpected video result: mime=%s bytes=%x", gotMime, gotBytes)
+	}
+}
+
 func TestGenAIAdapterGeminiOmniVideo(t *testing.T) {
 	t.Parallel()
 
@@ -261,10 +361,11 @@ func TestGenAIAdapterGeminiOmniVideo(t *testing.T) {
 
 	ctx := context.Background()
 	adapter, err := genai.NewAdapter(ctx, genai.Config{
-		APIKey:     "test-key",
-		VideoModel: "gemini-omni-1.2-flash",
-		BaseURL:    "https://genai.test",
-		HTTPClient: httpClient,
+		APIKey:               "test-key",
+		VideoModel:           "gemini-omni-1.2-flash",
+		VideoDurationSeconds: 180,
+		BaseURL:              "https://genai.test",
+		HTTPClient:           httpClient,
 		VideoStitcher: func(_ context.Context, clips [][]byte) ([]byte, error) {
 			stitchedClipCount = len(clips)
 			return stitchedPayload, nil

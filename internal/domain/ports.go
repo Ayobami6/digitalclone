@@ -29,6 +29,9 @@ type DraftRepository interface {
 
 	// RecordPublishedPost persists final publication status, external platform post ID, or failure details.
 	RecordPublishedPost(ctx context.Context, draftID string, status DraftStatus, externalPostID, failureReason string) error
+
+	// DeleteBatch removes a batch and any partial drafts (used to roll back failed pipeline triggers for clean retries).
+	DeleteBatch(ctx context.Context, batchID string) error
 }
 
 // PersonaLoader loads customizable Markdown persona instructions for a social platform.

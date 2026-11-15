@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
@@ -20,10 +21,10 @@ type PipelineRunner interface {
 // TriggerCommitPipelineUseCase orchestrates commit validation, idempotent batch creation,
 // ADK parallel generation + critique, and interactive Discord/Telegram review dispatch.
 type TriggerCommitPipelineUseCase struct {
-	draftRepo   domain.DraftRepository
+	draftRepo    domain.DraftRepository
 	orchestrator PipelineRunner
-	notifiers   []domain.ReviewNotifier
-	logger      *slog.Logger
+	notifiers    []domain.ReviewNotifier
+	logger       *slog.Logger
 }
 
 // NewTriggerCommitPipelineUseCase constructs a TriggerCommitPipelineUseCase.
@@ -60,6 +61,7 @@ func (useCase *TriggerCommitPipelineUseCase) Execute(ctx context.Context, commit
 	}
 
 	if err := useCase.orchestrator.RunPipeline(ctx, batch); err != nil {
+		useCase.cleanupFailedBatch(batch.ID)
 		return nil, fmt.Errorf("run multi-agent pipeline: %w", err)
 	}
 
@@ -87,6 +89,7 @@ func (useCase *TriggerCommitPipelineUseCase) Execute(ctx context.Context, commit
 	}
 
 	if len(loadedBatch.Drafts) == 0 {
+		useCase.cleanupFailedBatch(loadedBatch.ID)
 		return nil, fmt.Errorf("%w: pipeline produced no platform drafts for batch %s", domain.ErrValidationFailed, loadedBatch.ID)
 	}
 
@@ -135,4 +138,13 @@ func (useCase *TriggerCommitPipelineUseCase) Execute(ctx context.Context, commit
 	)
 
 	return loadedBatch, nil
+}
+
+// cleanupFailedBatch deletes incomplete batches after a pipeline error so retries for the same commit are not blocked.
+func (useCase *TriggerCommitPipelineUseCase) cleanupFailedBatch(batchID string) {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if delErr := useCase.draftRepo.DeleteBatch(cleanupCtx, batchID); delErr != nil {
+		useCase.logger.Warn("failed to clean up incomplete draft batch", "batch_id", batchID, "error", delErr)
+	}
 }

@@ -218,6 +218,35 @@ func (repo *SQLDraftRepository) CreateBatchIfAbsent(ctx context.Context, batch *
 	return rowsAffected == 1, nil
 }
 
+// DeleteBatch deletes a DraftBatch and any associated ContentDrafts inside an atomic transaction.
+func (repo *SQLDraftRepository) DeleteBatch(ctx context.Context, batchID string) error {
+	trimmedID := strings.TrimSpace(batchID)
+	if trimmedID == "" {
+		return fmt.Errorf("%w: batchID is required", domain.ErrValidationFailed)
+	}
+	if repo.dialect == dialectSQLite {
+		repo.sqliteWriteMu.Lock()
+		defer repo.sqliteWriteMu.Unlock()
+	}
+
+	tx, err := repo.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin delete batch tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, repo.rebind(`DELETE FROM content_drafts WHERE batch_id = ?`), trimmedID); err != nil {
+		return fmt.Errorf("delete batch drafts: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, repo.rebind(`DELETE FROM draft_batches WHERE id = ?`), trimmedID); err != nil {
+		return fmt.Errorf("delete draft batch: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit delete batch: %w", err)
+	}
+	return nil
+}
+
 // SaveDraft inserts or updates a ContentDraft keyed by (batch_id, platform).
 func (repo *SQLDraftRepository) SaveDraft(ctx context.Context, draft *domain.ContentDraft) error {
 	if draft == nil {
@@ -330,11 +359,11 @@ func (repo *SQLDraftRepository) GetBatch(ctx context.Context, batchID string) (*
 	`)
 
 	var (
-		changedFilesJSON  string
-		commitTimestamp   string
-		createdAtRaw      string
-		updatedAtRaw      string
-		batch             domain.DraftBatch
+		changedFilesJSON string
+		commitTimestamp  string
+		createdAtRaw     string
+		updatedAtRaw     string
+		batch            domain.DraftBatch
 	)
 	err := repo.db.QueryRowContext(ctx, batchQuery, batchID).Scan(
 		&batch.ID,

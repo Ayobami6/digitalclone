@@ -317,3 +317,63 @@ func TestBuildADKAgentTree(t *testing.T) {
 		t.Fatalf("expected 4 platform subagents under root_parallel_agent, got %d", len(parallelSubAgents))
 	}
 }
+
+type failOncePipelineRunner struct {
+	attempts atomic.Int32
+	repo     domain.DraftRepository
+	delegate application.PipelineRunner
+}
+
+func (runner *failOncePipelineRunner) RunPipeline(ctx context.Context, batch *domain.DraftBatch) error {
+	if runner.attempts.Add(1) == 1 {
+		// Persist one partial draft before failing to verify cascade cleanup on DeleteBatch.
+		_ = runner.repo.SaveDraft(ctx, &domain.ContentDraft{
+			ID:        "partial-x-draft",
+			BatchID:   batch.ID,
+			CommitSHA: batch.CommitEvent.CommitSHA,
+			Platform:  domain.PlatformX,
+			BodyText:  "partial draft",
+			Status:    domain.StatusDraft,
+			Version:   1,
+		})
+		return fmt.Errorf("simulated 429 RESOURCE_EXHAUSTED")
+	}
+	return runner.delegate.RunPipeline(ctx, batch)
+}
+
+func TestTriggerPipelineFailureCleansUpBatchForRetry(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	repo := newTestSQLiteRepo(t)
+	toolkit := application.NewAgentToolkit(repo, &stubPersonaLoader{}, &stubMediaGenerator{}, &stubAssetStorage{}, slog.Default())
+	orchestrator, err := application.NewADKOrchestrator(ctx, application.OrchestratorConfig{DryRun: true}, toolkit, slog.Default())
+	if err != nil {
+		t.Fatalf("NewADKOrchestrator failed: %v", err)
+	}
+
+	flakyRunner := &failOncePipelineRunner{
+		repo:     repo,
+		delegate: orchestrator,
+	}
+	triggerUC := application.NewTriggerCommitPipelineUseCase(repo, flakyRunner, nil, slog.Default())
+
+	commit := domain.CommitEvent{
+		RepoName:  "Ayobami6/digitalclone",
+		CommitSHA: "deadbeef12345678",
+		Message:   "fix: retry failed batch after rate limit",
+	}
+
+	if _, err := triggerUC.Execute(ctx, commit); err == nil {
+		t.Fatalf("expected first trigger execution to fail on simulated 429")
+	}
+
+	// Retrying the exact same commit must succeed instead of failing with ErrDuplicateCommitTrigger.
+	batch, err := triggerUC.Execute(ctx, commit)
+	if err != nil {
+		t.Fatalf("expected retry trigger execution to succeed, got %v", err)
+	}
+	if len(batch.Drafts) != 4 {
+		t.Fatalf("expected 4 drafts on retry, got %d", len(batch.Drafts))
+	}
+}

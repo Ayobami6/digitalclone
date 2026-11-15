@@ -10,3 +10,5 @@
 - [x] Implement interactive Discord REST v10 and Telegram Bot API review notifiers & callback handlers
 - [x] Implement dual-mode Commit Push Triggers (GitHub HMAC-SHA256 webhook + local `git` CLI `trigger` subcommand)
 - [x] Write comprehensive unit & race-detector tests across all packages and verify `go test -race ./...`, `go vet ./...`, and `golangci-lint run`
+- [x] Default Gemini Omni video generation to 15s single clip (`GEMINI_VIDEO_DURATION_SECONDS=15`) with serialized clip calls, 429 backoff, and failed-batch cleanup on pipeline errors
+- [ ] Scale Gemini Omni video generation back to 3–5 minutes (`180s`–`300s`) with spend-rate-limit pacing and progressive clip checkpointing ([#1](https://github.com/Ayobami6/digitalclone/issues/1))
