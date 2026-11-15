@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -97,7 +98,7 @@ func runCLI(ctx context.Context, args []string, logger *slog.Logger) error {
 }
 
 func runServeCommand(ctx context.Context, args []string, logger *slog.Logger) error {
-	cfg := loadConfigFromEnv()
+	cfg := loadConfigFromEnv(logger)
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.StringVar(&cfg.Port, "port", cfg.Port, "HTTP server listen port")
 	fs.BoolVar(&cfg.DryRun, "dry-run", cfg.DryRun, "Run in offline dry-run mode without external API calls")
@@ -153,7 +154,7 @@ func runServeCommand(ctx context.Context, args []string, logger *slog.Logger) er
 }
 
 func runTriggerCommand(ctx context.Context, args []string, logger *slog.Logger) error {
-	cfg := loadConfigFromEnv()
+	cfg := loadConfigFromEnv(logger)
 	repoPath := "."
 	commitRef := "HEAD"
 
@@ -304,7 +305,11 @@ func wireDependencies(ctx context.Context, cfg appConfig, logger *slog.Logger) (
 	}, cleanup, nil
 }
 
-func loadConfigFromEnv() appConfig {
+func loadConfigFromEnv(logger *slog.Logger) appConfig {
+	if err := loadDotEnv(".env"); err != nil && logger != nil {
+		logger.Warn("failed to load .env file", "error", err)
+	}
+
 	shareMode := buffer.ShareModeShareNow
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("BUFFER_SHARE_MODE")), string(buffer.ShareModeAddToQueue)) {
 		shareMode = buffer.ShareModeAddToQueue
@@ -360,4 +365,51 @@ func envOrDefault(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// loadDotEnv reads KEY=VALUE pairs from filePath when present and sets any
+// variables not already defined in the process environment.
+func loadDotEnv(filePath string) error {
+	cleanedPath := filepath.Clean(filePath)
+	raw, err := os.ReadFile(cleanedPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", cleanedPath, err)
+	}
+
+	for lineNum, rawLine := range strings.Split(string(raw), "\n") {
+		line := strings.TrimSpace(strings.TrimSuffix(rawLine, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "export ") {
+			line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		}
+
+		key, rawValue, found := strings.Cut(line, "=")
+		if !found {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+
+		value := strings.TrimSpace(rawValue)
+		if len(value) >= 2 && ((strings.HasPrefix(value, `"`) && strings.HasSuffix(value, `"`)) ||
+			(strings.HasPrefix(value, `'`) && strings.HasSuffix(value, `'`))) {
+			value = value[1 : len(value)-1]
+		}
+
+		// Preserve explicit process environment overrides over .env file entries.
+		if _, exists := os.LookupEnv(key); !exists {
+			if setErr := os.Setenv(key, value); setErr != nil {
+				return fmt.Errorf("set env %s (line %d): %w", key, lineNum+1, setErr)
+			}
+		}
+	}
+
+	return nil
 }

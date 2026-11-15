@@ -12,6 +12,17 @@ Complete configuration and onboarding guide for running **DigitalClone** in loca
 
 ---
 
+## Quick Start (`.env` Configuration)
+
+DigitalClone automatically loads `.env` from the working directory at startup (without overwriting variables already set in your shell or container environment). `.env` is ignored by git in [`.gitignore`](./.gitignore), and a full template is tracked in [`.env.example`](./.env.example).
+
+```bash
+cp .env.example .env
+# Then fill in your credentials inside .env
+```
+
+---
+
 ## Quick Verification (Offline Dry-Run)
 
 Before connecting live API keys, verify the toolchain and offline multi-agent pipeline:
