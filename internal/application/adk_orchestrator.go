@@ -46,7 +46,7 @@ func NewADKOrchestrator(ctx context.Context, config OrchestratorConfig, toolkit 
 		config.AppName = "digitalclone"
 	}
 	if strings.TrimSpace(config.ModelName) == "" {
-		config.ModelName = "gemini-2.5-flash"
+		config.ModelName = "gemini-3.5-flash-lite"
 	}
 
 	var llmModel model.LLM

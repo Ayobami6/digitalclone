@@ -188,7 +188,7 @@ func (toolkit *AgentToolkit) BuildADKTools() (*AgentToolSet, error) {
 
 	generateImageTool, err := functiontool.New(functiontool.Config{
 		Name:        "generate_content_image",
-		Description: "Generates a visual image via Google GenAI Imagen and uploads it to storage for LinkedIn or X posts.",
+		Description: "Generates a visual image via Google GenAI Gemini image or Imagen models and uploads it to storage for LinkedIn or X posts.",
 	}, func(toolCtx agent.ToolContext, input GenerateMediaInput) (GenerateMediaOutput, error) {
 		input.BatchID = resolveStateString(toolCtx, input.BatchID, "batch_id")
 		return toolkit.ExecuteGenerateImage(toolCtx, input)
@@ -199,7 +199,7 @@ func (toolkit *AgentToolkit) BuildADKTools() (*AgentToolSet, error) {
 
 	generateVideoTool, err := functiontool.New(functiontool.Config{
 		Name:        "generate_content_video",
-		Description: "Generates a vertical short-form video via Google GenAI Veo and uploads it for YouTube or TikTok posts.",
+		Description: "Generates a short-form video via Google GenAI Gemini Omni or Veo models and uploads it to storage for YouTube or TikTok posts.",
 	}, func(toolCtx agent.ToolContext, input GenerateMediaInput) (GenerateMediaOutput, error) {
 		input.BatchID = resolveStateString(toolCtx, input.BatchID, "batch_id")
 		return toolkit.ExecuteGenerateVideo(toolCtx, input)
@@ -291,7 +291,7 @@ func (toolkit *AgentToolkit) ExecuteGenerateText(ctx context.Context, input Gene
 	}, nil
 }
 
-// ExecuteGenerateImage synthesizes an image via Imagen and uploads it via AssetStorage.
+// ExecuteGenerateImage synthesizes an image via Gemini/Imagen and uploads it via AssetStorage.
 func (toolkit *AgentToolkit) ExecuteGenerateImage(ctx context.Context, input GenerateMediaInput) (GenerateMediaOutput, error) {
 	platform, err := domain.ParsePlatform(input.Platform)
 	if err != nil {
@@ -303,14 +303,17 @@ func (toolkit *AgentToolkit) ExecuteGenerateImage(ctx context.Context, input Gen
 	}
 	imageBytes, mimeType, err := toolkit.mediaGenerator.GenerateImage(ctx, input.Prompt, aspectRatio)
 	if err != nil {
+		toolkit.logger.Error("media generation failed", "platform", platform, "media_type", domain.MediaImage, "error", err)
 		return GenerateMediaOutput{}, fmt.Errorf("generate image for %s: %w", platform, err)
 	}
 	extension := extensionForMime(mimeType, "png")
 	fileName := fmt.Sprintf("%s-%s-%s.%s", sanitizeFilenamePart(input.BatchID), platform, uuid.NewString()[:8], extension)
 	asset, err := toolkit.assetStorage.UploadAsset(ctx, input.BatchID, platform, domain.MediaImage, fileName, mimeType, imageBytes)
 	if err != nil {
+		toolkit.logger.Error("media upload failed", "platform", platform, "media_type", domain.MediaImage, "error", err)
 		return GenerateMediaOutput{}, fmt.Errorf("upload image asset for %s: %w", platform, err)
 	}
+	toolkit.logger.Info("uploaded generated media asset", "platform", platform, "media_type", asset.MediaType, "public_url", asset.PublicURL)
 	return GenerateMediaOutput{
 		AssetID:   asset.ID,
 		MediaType: string(asset.MediaType),
@@ -320,7 +323,7 @@ func (toolkit *AgentToolkit) ExecuteGenerateImage(ctx context.Context, input Gen
 	}, nil
 }
 
-// ExecuteGenerateVideo synthesizes a short-form video via Veo and uploads it via AssetStorage.
+// ExecuteGenerateVideo synthesizes a short-form video via Gemini Omni/Veo and uploads it via AssetStorage.
 func (toolkit *AgentToolkit) ExecuteGenerateVideo(ctx context.Context, input GenerateMediaInput) (GenerateMediaOutput, error) {
 	platform, err := domain.ParsePlatform(input.Platform)
 	if err != nil {
@@ -332,14 +335,17 @@ func (toolkit *AgentToolkit) ExecuteGenerateVideo(ctx context.Context, input Gen
 	}
 	videoBytes, mimeType, err := toolkit.mediaGenerator.GenerateVideo(ctx, input.Prompt, aspectRatio)
 	if err != nil {
+		toolkit.logger.Error("media generation failed", "platform", platform, "media_type", domain.MediaVideo, "error", err)
 		return GenerateMediaOutput{}, fmt.Errorf("generate video for %s: %w", platform, err)
 	}
 	extension := extensionForMime(mimeType, "mp4")
 	fileName := fmt.Sprintf("%s-%s-%s.%s", sanitizeFilenamePart(input.BatchID), platform, uuid.NewString()[:8], extension)
 	asset, err := toolkit.assetStorage.UploadAsset(ctx, input.BatchID, platform, domain.MediaVideo, fileName, mimeType, videoBytes)
 	if err != nil {
+		toolkit.logger.Error("media upload failed", "platform", platform, "media_type", domain.MediaVideo, "error", err)
 		return GenerateMediaOutput{}, fmt.Errorf("upload video asset for %s: %w", platform, err)
 	}
+	toolkit.logger.Info("uploaded generated media asset", "platform", platform, "media_type", asset.MediaType, "public_url", asset.PublicURL)
 	return GenerateMediaOutput{
 		AssetID:   asset.ID,
 		MediaType: string(asset.MediaType),
