@@ -43,6 +43,29 @@ func TestBufferClientHierarchyAndCreatePost(t *testing.T) {
 		case strings.Contains(req.Query, "GetChannels"):
 			_, _ = w.Write([]byte(`{"data":{"channels":[{"id":"ch_li","name":"LinkedIn","service":"linkedin"},{"id":"ch_x","name":"X","service":"twitter"},{"id":"ch_tt","name":"TikTok","service":"tiktok"}]}}`))
 		case strings.Contains(req.Query, "SchedulePost"):
+			inputMap, ok := req.Variables["input"].(map[string]any)
+			if !ok {
+				t.Fatalf("expected input object in SchedulePost variables, got %T", req.Variables["input"])
+			}
+			assets, ok := inputMap["assets"].([]any)
+			if !ok || len(assets) != 1 {
+				t.Fatalf("expected 1 formatted asset in input.assets, got %#v", inputMap["assets"])
+			}
+			assetMap, ok := assets[0].(map[string]any)
+			if !ok {
+				t.Fatalf("expected asset entry object, got %T", assets[0])
+			}
+			if _, hasURL := assetMap["url"]; hasURL {
+				t.Fatalf("unexpected top-level url field in Buffer @oneOf AssetInput: %#v", assetMap)
+			}
+			if _, hasMime := assetMap["mimeType"]; hasMime {
+				t.Fatalf("unexpected top-level mimeType field in Buffer @oneOf AssetInput: %#v", assetMap)
+			}
+			imageObj, hasImage := assetMap["image"].(map[string]any)
+			if !hasImage || imageObj["url"] != "https://cdn.example.com/banner.png" {
+				t.Fatalf("expected image @oneOf asset {url: https://cdn.example.com/banner.png}, got %#v", assetMap)
+			}
+
 			// Simulate transient HTTP 429 on first createPost attempt to validate Retry-After handling.
 			if callNum == 3 {
 				w.Header().Set("Retry-After", "0")

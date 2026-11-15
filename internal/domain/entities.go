@@ -175,20 +175,21 @@ func (draft *ContentDraft) MarkPendingReview() error {
 	return nil
 }
 
-// Approve transitions a pending-review draft into APPROVED exactly once.
+// Approve transitions a pending-review or failed draft into APPROVED so publishing can proceed.
 func (draft *ContentDraft) Approve() error {
-	if draft.Status != StatusPendingReview {
+	if draft.Status != StatusPendingReview && draft.Status != StatusFailed {
 		return fmt.Errorf("%w: cannot approve draft in status %s", ErrInvalidStateTransition, draft.Status)
 	}
 	draft.Status = StatusApproved
+	draft.FailureReason = ""
 	draft.Version++
 	draft.UpdatedAt = time.Now().UTC()
 	return nil
 }
 
-// Reject transitions a pending-review draft into REJECTED (no publishing occurs).
+// Reject transitions a pending-review or failed draft into REJECTED (no publishing occurs).
 func (draft *ContentDraft) Reject() error {
-	if draft.Status != StatusPendingReview {
+	if draft.Status != StatusPendingReview && draft.Status != StatusFailed {
 		return fmt.Errorf("%w: cannot reject draft in status %s", ErrInvalidStateTransition, draft.Status)
 	}
 	draft.Status = StatusRejected
@@ -230,7 +231,7 @@ func (draft *ContentDraft) CanTransitionTo(targetStatus DraftStatus) bool {
 	case StatusPendingReview:
 		return draft.Status == StatusDraft || draft.Status == StatusCritiqued
 	case StatusApproved, StatusRejected:
-		return draft.Status == StatusPendingReview
+		return draft.Status == StatusPendingReview || draft.Status == StatusFailed
 	case StatusPublished, StatusFailed:
 		return draft.Status == StatusApproved
 	default:

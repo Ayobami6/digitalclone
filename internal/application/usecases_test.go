@@ -377,3 +377,85 @@ func TestTriggerPipelineFailureCleansUpBatchForRetry(t *testing.T) {
 		t.Fatalf("expected 4 drafts on retry, got %d", len(batch.Drafts))
 	}
 }
+
+type failOncePostService struct {
+	platform domain.Platform
+	attempts atomic.Int32
+}
+
+func (service *failOncePostService) Platform() domain.Platform {
+	return service.platform
+}
+
+func (service *failOncePostService) Publish(_ context.Context, draft *domain.ContentDraft) (string, error) {
+	if service.attempts.Add(1) == 1 {
+		return "", fmt.Errorf("simulated transient buffer failure")
+	}
+	return fmt.Sprintf("%s-retry-published-%s", service.platform, draft.ID), nil
+}
+
+func TestRetryFailedDraftPublishesSuccessfullyWithDetachedContext(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	repo := newTestSQLiteRepo(t)
+	toolkit := application.NewAgentToolkit(repo, &stubPersonaLoader{}, &stubMediaGenerator{}, &stubAssetStorage{}, slog.Default())
+	orchestrator, err := application.NewADKOrchestrator(ctx, application.OrchestratorConfig{DryRun: true}, toolkit, slog.Default())
+	if err != nil {
+		t.Fatalf("NewADKOrchestrator failed: %v", err)
+	}
+
+	triggerUC := application.NewTriggerCommitPipelineUseCase(repo, orchestrator, nil, slog.Default())
+	batch, err := triggerUC.Execute(ctx, domain.CommitEvent{
+		RepoName:  "Ayobami6/digitalclone",
+		CommitSHA: "cafebabe12345678",
+		Message:   "fix: allow retrying failed post",
+	})
+	if err != nil {
+		t.Fatalf("trigger failed: %v", err)
+	}
+
+	xSvc := &failOncePostService{platform: domain.PlatformX}
+	decisionUC := application.NewProcessReviewDecisionUseCase(repo, []domain.PlatformPostService{xSvc}, nil, slog.Default())
+
+	// First approve fails and records StatusFailed + failure reason.
+	firstRes, err := decisionUC.Execute(ctx, application.ReviewDecisionCommand{
+		BatchID:        batch.ID,
+		Action:         application.ReviewActionApprove,
+		TargetPlatform: "x",
+		Actor:          "ayobami",
+		Source:         "discord",
+	})
+	if err != nil {
+		t.Fatalf("first decision execute failed: %v", err)
+	}
+	if len(firstRes.FailureReasons) != 1 || firstRes.FailureReasons[domain.PlatformX] == "" {
+		t.Fatalf("expected failure reason for x, got %+v", firstRes.FailureReasons)
+	}
+
+	// Simulate Discord webhook request cancellation before retrying FAILED draft.
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+
+	retryRes, err := decisionUC.Execute(canceledCtx, application.ReviewDecisionCommand{
+		BatchID:        batch.ID,
+		Action:         application.ReviewActionApprove,
+		TargetPlatform: "x",
+		Actor:          "ayobami",
+		Source:         "discord",
+	})
+	if err != nil {
+		t.Fatalf("retry decision execute failed: %v", err)
+	}
+	if retryRes.PublishedIDs[domain.PlatformX] == "" || len(retryRes.FailureReasons) != 0 {
+		t.Fatalf("expected retry publish success, got published=%+v failures=%+v", retryRes.PublishedIDs, retryRes.FailureReasons)
+	}
+
+	reloaded, err := repo.GetDraft(ctx, batch.ID, domain.PlatformX)
+	if err != nil {
+		t.Fatalf("GetDraft failed: %v", err)
+	}
+	if reloaded.Status != domain.StatusPublished || reloaded.FailureReason != "" {
+		t.Fatalf("expected PUBLISHED with empty failure_reason, got status=%s reason=%q", reloaded.Status, reloaded.FailureReason)
+	}
+}

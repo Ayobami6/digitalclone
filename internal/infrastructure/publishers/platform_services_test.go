@@ -21,19 +21,22 @@ func TestBufferBackedPlatformPostServices(t *testing.T) {
 
 	var lastChannelID string
 	var lastText string
+	var lastAssets []map[string]map[string]string
 	bufferHTTPClient := newTestHTTPClient(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
 		var req struct {
 			Variables struct {
 				Input struct {
-					ChannelID string `json:"channelId"`
-					Text      string `json:"text"`
+					ChannelID string                         `json:"channelId"`
+					Text      string                         `json:"text"`
+					Assets    []map[string]map[string]string `json:"assets"`
 				} `json:"input"`
 			} `json:"variables"`
 		}
 		_ = json.Unmarshal(raw, &req)
 		lastChannelID = req.Variables.Input.ChannelID
 		lastText = req.Variables.Input.Text
+		lastAssets = req.Variables.Input.Assets
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"createPost":{"__typename":"PostActionSuccess","post":{"id":"buf_123","status":"sent"}}}}`))
 	})
@@ -96,6 +99,16 @@ func TestBufferBackedPlatformPostServices(t *testing.T) {
 		}
 		if postID != "buf_123" || lastChannelID != testCase.wantChannelID || !strings.Contains(lastText, "#golang") {
 			t.Fatalf("unexpected publish outcome: postID=%s channel=%s text=%q", postID, lastChannelID, lastText)
+		}
+		if len(lastAssets) != 1 {
+			t.Fatalf("%s expected 1 formatted asset, got %+v", testCase.platform, lastAssets)
+		}
+		expectedAssetKey := "image"
+		if testCase.mediaType == domain.MediaVideo {
+			expectedAssetKey = "video"
+		}
+		if lastAssets[0][expectedAssetKey]["url"] != testCase.mediaURL {
+			t.Fatalf("%s expected assets[0][%q][\"url\"] == %q, got %+v", testCase.platform, expectedAssetKey, testCase.mediaURL, lastAssets)
 		}
 	}
 }

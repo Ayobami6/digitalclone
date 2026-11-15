@@ -20,3 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Reduced default Gemini Omni video generation duration from 180s (12 clips) to a single 15s clip (`15s`–`300s` configurable via `GEMINI_VIDEO_DURATION_SECONDS`) and serialized Omni clip requests with 429 retry backoff to avoid Gemini spend-rate-limit (`RESOURCE_EXHAUSTED`) bursts; multi-minute scaling is tracked in [#1](https://github.com/Ayobami6/digitalclone/issues/1).
+
+### Fixed
+- Serialized Buffer GraphQL `createPost` media attachments using Buffer's `@oneOf` `AssetInput` schema (`{"image": {"url": ...}}` or `{"video": {"url": ...}}`) instead of invalid top-level `url`/`mimeType` fields.
+- Configured Buffer's default HTTP transport to dial IPv4 (`tcp4`) before falling back to IPv6 and retried transient `net.Error` failures so hosts without IPv6 routing do not fail on `api.buffer.com`.
+- Detached `ProcessReviewDecisionUseCase.Execute` from the incoming webhook request context (`context.WithoutCancel` + 2-minute timeout) so Discord's 3-second interaction deadline does not cancel in-flight publishing or review card status updates.
+- Logged platform publishing outcomes explicitly (including `published_ids` and `failure_reasons`) and enabled retrying `FAILED` drafts from Discord/Telegram review cards.

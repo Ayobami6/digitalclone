@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -88,6 +89,11 @@ func (useCase *ProcessReviewDecisionUseCase) Execute(ctx context.Context, comman
 		return nil, err
 	}
 
+	// Detach execution from incoming HTTP webhook request timeouts (e.g., Discord's 3s limit)
+	// so platform publishing and review card status updates complete reliably.
+	execCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+	defer cancel()
+
 	result := &ReviewDecisionResult{
 		BatchID:        command.BatchID,
 		Action:         command.Action,
@@ -103,7 +109,7 @@ func (useCase *ProcessReviewDecisionUseCase) Execute(ctx context.Context, comman
 	approvedDrafts := make([]*domain.ContentDraft, 0, len(targetPlatforms))
 	for _, platform := range targetPlatforms {
 		updatedDraft, transitioned, transitionErr := useCase.draftRepo.TransitionDraftStatusAtomically(
-			ctx,
+			execCtx,
 			command.BatchID,
 			platform,
 			targetStatus,
@@ -123,7 +129,7 @@ func (useCase *ProcessReviewDecisionUseCase) Execute(ctx context.Context, comman
 
 	if command.Action == ReviewActionApprove && len(approvedDrafts) > 0 {
 		var resultMu sync.Mutex
-		publishGroup, publishCtx := errgroup.WithContext(ctx)
+		publishGroup, publishCtx := errgroup.WithContext(execCtx)
 
 		for _, draft := range approvedDrafts {
 			currentDraft := draft
@@ -131,6 +137,11 @@ func (useCase *ProcessReviewDecisionUseCase) Execute(ctx context.Context, comman
 				publisher, ok := useCase.publishers[currentDraft.Platform]
 				if !ok {
 					reason := fmt.Sprintf("no post service registered for %s", currentDraft.Platform)
+					useCase.logger.Error("platform publish failed",
+						"batch_id", command.BatchID,
+						"platform", currentDraft.Platform,
+						"error", reason,
+					)
 					_ = useCase.draftRepo.RecordPublishedPost(publishCtx, currentDraft.ID, domain.StatusFailed, "", reason)
 					resultMu.Lock()
 					result.FailureReasons[currentDraft.Platform] = reason
@@ -140,6 +151,11 @@ func (useCase *ProcessReviewDecisionUseCase) Execute(ctx context.Context, comman
 
 				externalPostID, pubErr := publisher.Publish(publishCtx, currentDraft)
 				if pubErr != nil {
+					useCase.logger.Error("platform publish failed",
+						"batch_id", command.BatchID,
+						"platform", currentDraft.Platform,
+						"error", pubErr,
+					)
 					_ = useCase.draftRepo.RecordPublishedPost(publishCtx, currentDraft.ID, domain.StatusFailed, "", pubErr.Error())
 					resultMu.Lock()
 					result.FailureReasons[currentDraft.Platform] = pubErr.Error()
@@ -150,6 +166,11 @@ func (useCase *ProcessReviewDecisionUseCase) Execute(ctx context.Context, comman
 				if recErr := useCase.draftRepo.RecordPublishedPost(publishCtx, currentDraft.ID, domain.StatusPublished, externalPostID, ""); recErr != nil {
 					return fmt.Errorf("record published status for %s: %w", currentDraft.Platform, recErr)
 				}
+				useCase.logger.Info("platform publish succeeded",
+					"batch_id", command.BatchID,
+					"platform", currentDraft.Platform,
+					"external_post_id", externalPostID,
+				)
 				resultMu.Lock()
 				result.PublishedIDs[currentDraft.Platform] = externalPostID
 				resultMu.Unlock()
@@ -164,9 +185,9 @@ func (useCase *ProcessReviewDecisionUseCase) Execute(ctx context.Context, comman
 
 	// Sync updated status cards back to Discord and Telegram whenever any platform transitioned.
 	if len(result.TransitionedPlatforms) > 0 {
-		latestBatch, getErr := useCase.draftRepo.GetBatch(ctx, command.BatchID)
+		latestBatch, getErr := useCase.draftRepo.GetBatch(execCtx, command.BatchID)
 		if getErr == nil {
-			syncGroup, syncCtx := errgroup.WithContext(ctx)
+			syncGroup, syncCtx := errgroup.WithContext(execCtx)
 			for _, notifier := range useCase.notifiers {
 				currentNotifier := notifier
 				syncGroup.Go(func() error {
@@ -192,6 +213,8 @@ func (useCase *ProcessReviewDecisionUseCase) Execute(ctx context.Context, comman
 		"actor", command.Actor,
 		"transitioned", result.TransitionedPlatforms,
 		"skipped", result.SkippedPlatforms,
+		"published_ids", result.PublishedIDs,
+		"failure_reasons", result.FailureReasons,
 	)
 
 	return result, nil

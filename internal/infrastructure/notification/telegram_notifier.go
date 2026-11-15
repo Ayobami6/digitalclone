@@ -211,14 +211,21 @@ func buildTelegramPayload(chatID string, batch *domain.DraftBatch) map[string]an
 		if draft.ExternalPostID != "" {
 			fmt.Fprintf(&textBuilder, "<i>Post ID:</i> <code>%s</code>\n", html.EscapeString(draft.ExternalPostID))
 		}
+		if draft.FailureReason != "" {
+			fmt.Fprintf(&textBuilder, "<i>Failure:</i> <code>%s</code>\n", html.EscapeString(truncate(draft.FailureReason, 200)))
+		}
 		textBuilder.WriteString("\n")
 
-		if draft.Status == domain.StatusPendingReview {
+		if draft.Status == domain.StatusPendingReview || draft.Status == domain.StatusFailed {
 			hasPending = true
+			approveLabel := "Approve " + displayPlatformName(platform)
+			if draft.Status == domain.StatusFailed {
+				approveLabel = "Retry " + displayPlatformName(platform)
+			}
 			// Compact callback_data keeps payloads safely within Telegram's 64-byte callback limit.
 			platformButtons = append(platformButtons, []map[string]any{
 				{
-					"text":          "Approve " + displayPlatformName(platform),
+					"text":          approveLabel,
 					"callback_data": fmt.Sprintf("rv|%s|ap|%s", batch.ID, platform),
 				},
 				{

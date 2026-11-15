@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,12 +59,12 @@ type AssetInput struct {
 
 // CreatePostParams contains normalized parameters for scheduling or publishing via Buffer.
 type CreatePostParams struct {
-	Platform   domain.Platform
-	Text       string
-	Assets     []AssetInput
-	ShareMode  ShareMode
-	DueAt      string
-	SaveDraft  bool
+	Platform  domain.Platform
+	Text      string
+	Assets    []AssetInput
+	ShareMode ShareMode
+	DueAt     string
+	SaveDraft bool
 }
 
 // Client wraps the Buffer GraphQL API with channel caching, rate-limit tracking, and circuit breaking.
@@ -104,7 +106,34 @@ func NewClient(config Config) *Client {
 	}
 	httpClient := config.HTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: requestTimeout}
+		// Prefer IPv4 first to avoid unreachable IPv6 routes on hosts lacking IPv6 connectivity.
+		dialer := &net.Dialer{
+			Timeout:   requestTimeout,
+			KeepAlive: 30 * time.Second,
+		}
+		var transport http.RoundTripper
+		if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
+			clonedTransport := defaultTransport.Clone()
+			clonedTransport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				if network == "tcp" {
+					conn, tcp4Err := dialer.DialContext(ctx, "tcp4", addr)
+					if tcp4Err == nil {
+						return conn, nil
+					}
+					fallbackConn, tcp6Err := dialer.DialContext(ctx, "tcp6", addr)
+					if tcp6Err == nil {
+						return fallbackConn, nil
+					}
+					return nil, fmt.Errorf("tcp4 dial failed (%w); tcp6 fallback failed (%w)", tcp4Err, tcp6Err)
+				}
+				return dialer.DialContext(ctx, network, addr)
+			}
+			transport = clonedTransport
+		}
+		httpClient = &http.Client{
+			Timeout:   requestTimeout,
+			Transport: transport,
+		}
 	}
 	logger := config.Logger
 	if logger == nil {
@@ -169,8 +198,8 @@ func (client *Client) CreatePost(ctx context.Context, params CreatePostParams) (
 	if mode == ShareModeCustomScheduled && strings.TrimSpace(params.DueAt) != "" {
 		input["dueAt"] = strings.TrimSpace(params.DueAt)
 	}
-	if len(params.Assets) > 0 {
-		input["assets"] = params.Assets
+	if formattedAssets := formatGraphQLAssets(params.Assets); len(formattedAssets) > 0 {
+		input["assets"] = formattedAssets
 	}
 
 	const mutation = `
@@ -341,7 +370,11 @@ func (client *Client) executeGraphQL(ctx context.Context, query string, variable
 			BaseDelay:   500 * time.Millisecond,
 			MaxDelay:    15 * time.Second,
 			ShouldRetry: func(err error) bool {
-				return errors.Is(err, domain.ErrRateLimited)
+				if errors.Is(err, domain.ErrRateLimited) {
+					return true
+				}
+				var netErr net.Error
+				return errors.As(err, &netErr)
 			},
 		}, func(attemptCtx context.Context) error {
 			reqCtx, cancel := context.WithTimeout(attemptCtx, client.requestTimeout)
@@ -406,6 +439,38 @@ func (client *Client) executeGraphQL(ctx context.Context, query string, variable
 			return nil
 		})
 	})
+}
+
+// formatGraphQLAssets converts generic asset inputs into Buffer's @oneOf AssetInput structures.
+func formatGraphQLAssets(assets []AssetInput) []map[string]any {
+	formatted := make([]map[string]any, 0, len(assets))
+	for _, asset := range assets {
+		assetURL := strings.TrimSpace(asset.URL)
+		if assetURL == "" {
+			continue
+		}
+		mimeType := strings.ToLower(strings.TrimSpace(asset.MimeType))
+		urlPath := strings.ToLower(assetURL)
+		if parsed, err := url.Parse(assetURL); err == nil && parsed.Path != "" {
+			urlPath = strings.ToLower(parsed.Path)
+		}
+		isVideo := strings.HasPrefix(mimeType, "video/") ||
+			strings.HasSuffix(urlPath, ".mp4") ||
+			strings.HasSuffix(urlPath, ".mov") ||
+			strings.HasSuffix(urlPath, ".webm")
+
+		// Buffer GraphQL AssetInput requires @oneOf union with either "video" or "image".
+		if isVideo {
+			formatted = append(formatted, map[string]any{
+				"video": map[string]any{"url": assetURL},
+			})
+		} else {
+			formatted = append(formatted, map[string]any{
+				"image": map[string]any{"url": assetURL},
+			})
+		}
+	}
+	return formatted
 }
 
 func bufferServiceName(platform domain.Platform) (string, error) {

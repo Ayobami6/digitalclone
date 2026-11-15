@@ -176,8 +176,8 @@ func buildDiscordMessagePayload(batch *domain.DraftBatch) map[string]any {
 		if !exists {
 			continue
 		}
-		isPending := draft.Status == domain.StatusPendingReview
-		if isPending {
+		isActionable := draft.Status == domain.StatusPendingReview || draft.Status == domain.StatusFailed
+		if isActionable {
 			hasPending = true
 		}
 
@@ -210,19 +210,23 @@ func buildDiscordMessagePayload(batch *domain.DraftBatch) map[string]any {
 		}
 		embeds = append(embeds, embed)
 
+		approveLabel := "Approve " + displayPlatformName(platform)
+		if draft.Status == domain.StatusFailed {
+			approveLabel = "Retry " + displayPlatformName(platform)
+		}
 		approveRow = append(approveRow, map[string]any{
 			"type":      2,
 			"style":     1,
-			"label":     "Approve " + displayPlatformName(platform),
+			"label":     approveLabel,
 			"custom_id": fmt.Sprintf("review:%s:approve:%s", batch.ID, platform),
-			"disabled":  !isPending,
+			"disabled":  !isActionable,
 		})
 		rejectRow = append(rejectRow, map[string]any{
 			"type":      2,
 			"style":     2,
 			"label":     "Reject " + displayPlatformName(platform),
 			"custom_id": fmt.Sprintf("review:%s:reject:%s", batch.ID, platform),
-			"disabled":  !isPending,
+			"disabled":  !isActionable,
 		})
 	}
 

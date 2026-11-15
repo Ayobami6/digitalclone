@@ -163,4 +163,24 @@ func TestContentDraftStateMachine(t *testing.T) {
 			t.Fatalf("expected ErrInvalidStateTransition, got %v", err)
 		}
 	})
+
+	t.Run("allows retrying failed draft via approve and clears failure reason", func(t *testing.T) {
+		t.Parallel()
+		draft := newDraft(domain.StatusPendingReview)
+		if err := draft.Approve(); err != nil {
+			t.Fatalf("Approve failed: %v", err)
+		}
+		if err := draft.MarkFailed("buffer timeout"); err != nil {
+			t.Fatalf("MarkFailed failed: %v", err)
+		}
+		if !draft.CanTransitionTo(domain.StatusApproved) {
+			t.Fatalf("expected StatusFailed to allow transition to StatusApproved")
+		}
+		if err := draft.Approve(); err != nil {
+			t.Fatalf("Retry Approve from FAILED failed: %v", err)
+		}
+		if draft.Status != domain.StatusApproved || draft.FailureReason != "" {
+			t.Fatalf("expected APPROVED with cleared failure reason, got status=%s reason=%q", draft.Status, draft.FailureReason)
+		}
+	})
 }

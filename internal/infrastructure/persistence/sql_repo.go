@@ -554,13 +554,14 @@ func (repo *SQLDraftRepository) TransitionDraftStatusAtomically(
 
 	updateQuery := repo.rebind(`
 		UPDATE content_drafts
-		SET status = ?, version = ?, updated_at = ?
+		SET status = ?, failure_reason = ?, version = ?, updated_at = ?
 		WHERE id = ? AND version = ?
 	`)
 	result, err := tx.ExecContext(
 		ctx,
 		updateQuery,
 		string(draft.Status),
+		draft.FailureReason,
 		draft.Version,
 		draft.UpdatedAt.UTC().Format(time.RFC3339Nano),
 		draft.ID,

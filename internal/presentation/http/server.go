@@ -315,6 +315,12 @@ func (server *Server) handleDiscordInteraction(writer http.ResponseWriter, reque
 
 	summary := fmt.Sprintf("Processed %s for %s (transitioned: %v, skipped: %v)",
 		result.Action, command.TargetPlatform, result.TransitionedPlatforms, result.SkippedPlatforms)
+	if len(result.PublishedIDs) > 0 {
+		summary += fmt.Sprintf(" | published: %v", result.PublishedIDs)
+	}
+	if len(result.FailureReasons) > 0 {
+		summary += fmt.Sprintf(" | FAILED: %v", result.FailureReasons)
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"type": 4,
 		"data": map[string]any{
