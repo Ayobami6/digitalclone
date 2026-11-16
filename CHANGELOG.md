@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Professional `README.md` covering the problem, audience, architecture diagrams, technical deep dive, and deployment instructions.
 - Configurable `GEMINI_VIDEO_DURATION_SECONDS` (defaulting to `15`s single-clip generation) and `DeleteBatch` rollback on failed commit triggers so transient rate-limit errors allow clean retries.
 - Hexagonal Architecture core (`internal/domain`, `internal/application`, `internal/infrastructure`, `internal/presentation`) for commit-triggered social content automation.
 - Google ADK (`google.golang.org/adk`) multi-agent pipeline combining `ParallelAgent` (LinkedIn, YouTube, X, TikTok `llmagent`s) and sequential `ContentCriticAgent` with typed `functiontool` tools (`load_persona_skill`, `generate_content_text`, `generate_content_image`, `generate_content_video`, `save_content_draft`, `get_content`, `update_content`).
